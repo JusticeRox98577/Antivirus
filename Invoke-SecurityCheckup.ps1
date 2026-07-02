@@ -167,6 +167,20 @@ if ($mpPrefs) {
     } else {
         Add-Finding 'Defender' 'Attack Surface Reduction rules' 'WARN' 'No ASR rules active. These block credential theft from LSASS, malicious Office macros, and script-based droppers.' 'Run .\Enable-Protections.ps1'
     }
+
+    # Exclusions are the hole malware asks users to open ("disable your AV to
+    # install"). Non-admins may see "N/A: Must be an administrator..." here.
+    $exclusions = @()
+    foreach ($e in @($mpPrefs.ExclusionPath))      { if ($e -and $e -notmatch '^N/A') { $exclusions += "Path: $e" } }
+    foreach ($e in @($mpPrefs.ExclusionProcess))   { if ($e -and $e -notmatch '^N/A') { $exclusions += "Process: $e" } }
+    foreach ($e in @($mpPrefs.ExclusionExtension)) { if ($e -and $e -notmatch '^N/A') { $exclusions += "Extension: $e" } }
+    if ($exclusions.Count -gt 0) {
+        Add-Finding 'Defender' 'Scan exclusions' 'WARN' ("Defender is configured to IGNORE {0} location(s)/process(es). Cracked-software installers commonly ask for these:`n    {1}" -f $exclusions.Count, ($exclusions -join "`n    ")) 'Remove any you cannot explain: Remove-MpPreference -ExclusionPath "<path>" (or -ExclusionProcess / -ExclusionExtension).'
+    } elseif (-not $isAdmin) {
+        Add-Finding 'Defender' 'Scan exclusions' 'INFO' 'Exclusions require administrator rights to view; re-run elevated.'
+    } else {
+        Add-Finding 'Defender' 'Scan exclusions' 'PASS' 'No exclusions - Defender scans everything.'
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -333,14 +347,48 @@ try {
 }
 
 # ---------------------------------------------------------------------------
-# 8. Hosts file tampering
+# 8. Recent Defender detections - repeated hits mean the source is still there
+# ---------------------------------------------------------------------------
+if ($mpStatus) {
+    Write-Host 'Checking Defender detection history...'
+    try {
+        $threatNames = @{}
+        foreach ($t in @(Get-MpThreat -ErrorAction SilentlyContinue)) {
+            $threatNames[[string]$t.ThreatID] = $t.ThreatName
+        }
+        $recent = @(Get-MpThreatDetection -ErrorAction Stop |
+            Where-Object { $_.InitialDetectionTime -gt (Get-Date).AddDays(-90) } |
+            Sort-Object InitialDetectionTime -Descending)
+        if ($recent.Count -gt 0) {
+            $lines = foreach ($d in ($recent | Select-Object -First 10)) {
+                $name = $threatNames[[string]$d.ThreatID]
+                if (-not $name) { $name = "ThreatID $($d.ThreatID)" }
+                '{0:yyyy-MM-dd}  {1}' -f $d.InitialDetectionTime, $name
+            }
+            Add-Finding 'Malware indicators' 'Recent Defender detections' 'WARN' ("Defender flagged {0} threat(s) in the last 90 days (newest first):`n    {1}" -f $recent.Count, ($lines -join "`n    ")) 'Review Windows Security -> Protection history. Repeated trojan/stealer detections mean the source (often cracked downloads) is still active - see IF-YOUR-INFO-WAS-STOLEN.md.'
+        } else {
+            Add-Finding 'Malware indicators' 'Recent Defender detections' 'PASS' 'No Defender threat detections in the last 90 days.'
+        }
+    } catch {
+        Add-Finding 'Malware indicators' 'Recent Defender detections' 'INFO' 'No detection history available.'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 9. Hosts file tampering
 # ---------------------------------------------------------------------------
 $hostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
 if (Test-Path $hostsPath) {
     $hostsEntries = @(Get-Content -Path $hostsPath -ErrorAction SilentlyContinue |
         Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' })
-    if ($hostsEntries.Count -gt 0) {
-        Add-Finding 'Malware indicators' 'Hosts file' 'WARN' ("The hosts file contains {0} active entr{1}. Malware uses it to redirect or block security sites:`n    {2}" -f $hostsEntries.Count, $(if ($hostsEntries.Count -eq 1) { 'y' } else { 'ies' }), (($hostsEntries | Select-Object -First 15) -join "`n    ")) 'If you did not add these yourself, remove them (edit as admin: notepad C:\Windows\System32\drivers\etc\hosts).'
+    # Entries pointing at 0.0.0.0/localhost merely BLOCK a domain (ad-blockers do
+    # this). Entries pointing anywhere else REDIRECT the domain to a server
+    # someone controls - much more dangerous.
+    $redirects = @($hostsEntries | Where-Object { $_.Trim() -notmatch '^(0\.0\.0\.0|127\.0\.0\.1|::1)\s' })
+    if ($redirects.Count -gt 0) {
+        Add-Finding 'Malware indicators' 'Hosts file' 'FAIL' ("{0} hosts entr{1} REDIRECT domains to a specific server instead of blocking them - browsing those domains lands on whatever that server chooses to show:`n    {2}" -f $redirects.Count, $(if ($redirects.Count -eq 1) { 'y' } else { 'ies' }), (($redirects | Select-Object -First 15) -join "`n    ")) 'Unless you added these yourself for a reason you can explain, delete them (edit as admin: notepad C:\Windows\System32\drivers\etc\hosts).'
+    } elseif ($hostsEntries.Count -gt 0) {
+        Add-Finding 'Malware indicators' 'Hosts file' 'INFO' ("The hosts file blocks {0} domain(s) (entries pointing to 0.0.0.0/127.0.0.1). Harmless if you or an ad-blocker added them; malware occasionally uses this to block security sites:`n    {1}" -f $hostsEntries.Count, (($hostsEntries | Select-Object -First 15) -join "`n    ")) 'If you did not add these, remove them (edit as admin: notepad C:\Windows\System32\drivers\etc\hosts).'
     } else {
         Add-Finding 'Malware indicators' 'Hosts file' 'PASS' 'No active redirect entries.'
     }
