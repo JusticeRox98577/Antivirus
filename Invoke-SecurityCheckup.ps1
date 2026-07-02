@@ -326,6 +326,16 @@ if ($suspiciousAutoruns.Count -gt 0) {
     Add-Finding 'Malware indicators' 'Autorun entries' 'PASS' "Reviewed $autorunCount autorun entries; none match known-bad patterns (heuristic check, not a guarantee)."
 }
 
+# UserInitMprLogonScript runs a program at every logon and is a known trojan
+# persistence spot (seen in the wild launching a RAT hidden in AppData).
+# Outside corporate domain logon scripts it is almost never legitimate.
+foreach ($envKey in @('HKCU:\Environment', 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment')) {
+    $logonScript = (Get-ItemProperty -Path $envKey -Name 'UserInitMprLogonScript' -ErrorAction SilentlyContinue).UserInitMprLogonScript
+    if ($logonScript) {
+        Add-Finding 'Malware indicators' 'Logon script persistence' 'FAIL' ("UserInitMprLogonScript is set in {0}:`n    {1}`nThis relaunches a program at every logon and is almost always malware on a home PC." -f $envKey, $logonScript) "If unrecognized, run a Microsoft Defender Offline scan, then remove it: Remove-ItemProperty -Path '$envKey' -Name UserInitMprLogonScript"
+    }
+}
+
 # ---------------------------------------------------------------------------
 # 7. Scheduled tasks - the other favorite persistence spot
 # ---------------------------------------------------------------------------
