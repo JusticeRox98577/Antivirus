@@ -174,7 +174,13 @@ if ($mpPrefs) {
     foreach ($e in @($mpPrefs.ExclusionPath))      { if ($e -and $e -notmatch '^N/A') { $exclusions += "Path: $e" } }
     foreach ($e in @($mpPrefs.ExclusionProcess))   { if ($e -and $e -notmatch '^N/A') { $exclusions += "Process: $e" } }
     foreach ($e in @($mpPrefs.ExclusionExtension)) { if ($e -and $e -notmatch '^N/A') { $exclusions += "Extension: $e" } }
-    if ($exclusions.Count -gt 0) {
+    # Excluding a whole drive, a user profile, AppData, Temp, Downloads, or
+    # ProgramData blinds Defender to the places malware actually runs from.
+    $riskyPattern = '(?i)(^Path: [a-z]:\\?$|\\Users\\[^\\]+\\?$|\\AppData\b|\\Temp\b|\\Downloads\b|\\ProgramData\b)'
+    $riskyExclusions = @($exclusions | Where-Object { $_ -match $riskyPattern })
+    if ($riskyExclusions.Count -gt 0) {
+        Add-Finding 'Defender' 'Scan exclusions' 'FAIL' ("Defender is told to IGNORE location(s) where malware typically lives - infostealers can run there completely unseen:`n    {0}" -f ($riskyExclusions -join "`n    ")) 'Remove immediately: Remove-MpPreference -ExclusionPath "<path>"  then run: Start-MpScan -ScanType FullScan'
+    } elseif ($exclusions.Count -gt 0) {
         Add-Finding 'Defender' 'Scan exclusions' 'WARN' ("Defender is configured to IGNORE {0} location(s)/process(es). Cracked-software installers commonly ask for these:`n    {1}" -f $exclusions.Count, ($exclusions -join "`n    ")) 'Remove any you cannot explain: Remove-MpPreference -ExclusionPath "<path>" (or -ExclusionProcess / -ExclusionExtension).'
     } elseif (-not $isAdmin) {
         Add-Finding 'Defender' 'Scan exclusions' 'INFO' 'Exclusions require administrator rights to view; re-run elevated.'
